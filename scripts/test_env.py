@@ -95,18 +95,21 @@ def main() -> int:
     assert env.observation_space.contains(obs)
     assert obs.tolist() == [0, 2]  # start x=0, y=width//2
 
-    # Walk along the corridor to the goal (only right moves).
+    # Walk along the corridor to the goal (only right moves); goal no longer ends episode.
     total_reward = 0.0
+    reached_goal = False
     terminated = truncated = False
     for _ in range(20):
         obs, reward, terminated, truncated, _ = env.step(3)
         total_reward += float(reward)
+        if float(reward) == 1.0:
+            reached_goal = True
         if terminated or truncated:
             break
 
-    assert terminated and not truncated, "expected goal before max_steps"
+    assert reached_goal and not truncated, "expected goal before max_steps"
     assert obs.tolist()[0] == env.length - 1
-    assert total_reward == 1.0
+    assert total_reward >= 1.0
 
     # Lava: from center row, step "up" until y < 0 terminates with 0 reward.
     env2 = TightropeEnv(width=3, length=10, max_steps=50)

@@ -6,12 +6,12 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=7-00:00:00
-#SBATCH --output=/home/fit/alex/LufanCao/l1coverage_project_reinforce/logs/eval_codex_w_%j.out
-#SBATCH --error=/home/fit/alex/LufanCao/l1coverage_project_reinforce/logs/eval_codex_w_%j.err
+#SBATCH --output=/home/fit/alex/LufanCao/codex_direct_calc_w/logs/eval_codex_w_%j.out
+#SBATCH --error=/home/fit/alex/LufanCao/codex_direct_calc_w/logs/eval_codex_w_%j.err
 
 set -euo pipefail
 
-PROJECT_DIR="/home/fit/alex/LufanCao/l1coverage_project_reinforce"
+PROJECT_DIR="/home/fit/alex/LufanCao/codex_direct_calc_w"
 SCRIPT_PATH="$PROJECT_DIR/scripts/eval_codex_w.py"
 LOG_DIR="$PROJECT_DIR/logs"
 

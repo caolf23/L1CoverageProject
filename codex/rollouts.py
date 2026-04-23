@@ -133,7 +133,7 @@ def tightrope_predict_next(
     nx = max(0, min(length - 1, nx))
     nobs = np.array([nx, ny], dtype=np.int32)
     if nx == length - 1:
-        return nobs, True, False, 1.0
+        return nobs, False, False, 1.0
     return nobs, False, False, 0.0
 
 

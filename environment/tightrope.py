@@ -17,7 +17,8 @@ class TightropeEnv(gym.Env):
     the corridor) and ``y ∈ [0, width-1]`` (across the corridor). Failed moves into
     lava transition into a dedicated absorbing state ``(length, width)`` with reward
     0, and the process stays there thereafter. Reaching ``x == length - 1`` (the far
-    end) yields reward 1 and terminates.
+    end) yields reward 1 but the episode does not terminate; rollout continues until
+    ``max_steps`` (truncation) or a lava transition.
 
     Actions are discrete: 0 up (−y), 1 down (+y), 2 left (−x), 3 right (+x).
     """
@@ -99,7 +100,7 @@ class TightropeEnv(gym.Env):
         self._pos[1] = ny
 
         if nx == self.length - 1:
-            return self._pos.copy(), 1.0, True, False, {}
+            return self._pos.copy(), 1.0, False, truncated, {}
 
         return self._pos.copy(), 0.0, False, truncated, {}
 

@@ -73,16 +73,17 @@ def _eval_uniform_policy(
         obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
         seen.add(tuple(int(x) for x in np.asarray(obs).reshape(-1)))
         terminated = truncated = False
-        last_reward = 0.0
+        reached_goal = False
         for _t in range(horizon_h):
             if terminated or truncated:
                 break
             a = int(rng.integers(0, n_actions))
             obs, reward, terminated, truncated, _ = env.step(a)
-            last_reward = float(reward)
+            if float(reward) == 1.0:
+                reached_goal = True
             seen.add(tuple(int(x) for x in np.asarray(obs).reshape(-1)))
             total_steps += 1
-        if terminated and last_reward == 1.0:
+        if reached_goal:
             success += 1
 
     uniq = len(seen)
@@ -110,7 +111,7 @@ def _eval_mixture_policy(
         obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
         seen.add(tuple(int(x) for x in np.asarray(obs).reshape(-1)))
         terminated = truncated = False
-        last_reward = 0.0
+        reached_goal = False
 
         pi = mixture.sample_policy(rng)
         for t in range(rollout_steps):
@@ -118,11 +119,12 @@ def _eval_mixture_policy(
                 break
             a = pi.act(np.asarray(obs), t, rng)
             obs, reward, terminated, truncated, _ = env.step(a)
-            last_reward = float(reward)
+            if float(reward) == 1.0:
+                reached_goal = True
             seen.add(tuple(int(x) for x in np.asarray(obs).reshape(-1)))
             total_steps += 1
 
-        if terminated and last_reward == 1.0:
+        if reached_goal:
             success += 1
 
     uniq = len(seen)
@@ -421,8 +423,9 @@ def main() -> int:
 
     width, length = 1, 8
     n_actions = 4
-    horizon_h = 5
-    epsilon = 0.34
+    horizon_h = 10
+    epsilon = 0.05
+
     t_rounds = int(np.ceil(1.0 / epsilon))
     root_dir = _root()
     run_dirs = _make_run_dirs(root_dir, width=width, length=length, t_rounds=t_rounds)
@@ -430,7 +433,7 @@ def main() -> int:
     def env_factory() -> TightropeEnv:
         return TightropeEnv(width=width, length=length, max_steps=400)
 
-    psdp_epsilon_greedy = 0.1
+    psdp_epsilon_greedy = 0.0
     per_h_rollouts = 500
     print("epsilon_greedy: ", psdp_epsilon_greedy)
     rng_seed = 42
@@ -442,10 +445,10 @@ def main() -> int:
         "width": width,
         "length": length,
         "rng": np.random.default_rng(rng_seed),
-        "epsilon_w": 1.0,
+        "epsilon_w": 0.5,
         "weight_fit_steps": 500,
         "psdp_samples": 1000,
-        "n_weight_cap": 256,
+        "n_weight_cap": 1024,
         "weight_sample_workers": 8,
         "weight_fit_lr": 0.50,
         "weight_fit_lr_decay": 1.0,
@@ -453,7 +456,7 @@ def main() -> int:
         "weight_zero_absorbing_after_fit": False,
         "psdp_epsilon_greedy": psdp_epsilon_greedy,
         "return_diagnostics": True,
-        "verbose": False,
+        "verbose": True,
     }
     config_payload = {
         "script": "scripts/eval_codex_w.py",
@@ -601,7 +604,7 @@ def main() -> int:
     try:
         from scripts.plot_heatmap_from_rollouts import plot_all_from_run_dir
 
-        plot_outputs = plot_all_from_run_dir(run_dirs["run_dir"])
+        plot_outputs = plot_all_from_run_dir(run_dirs["run_dir"], count_mode="both")
         print(f"auto_plot_generated_files: {len(plot_outputs)}")
     except Exception as exc:
         print(f"WARN: auto plot generation failed: {exc}")
