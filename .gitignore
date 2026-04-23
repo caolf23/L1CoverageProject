@@ -1,0 +1,38 @@
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Notebook / editor junk
+.ipynb_checkpoints/
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime outputs
+logs/
+output/
+tmp
+tmp/
+
+# Large data artifacts
+*.npz
+*.npy
+*.pt
+*.pth
+
+# Local environment / secrets
+.env
+.env.*
