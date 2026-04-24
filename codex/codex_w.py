@@ -74,9 +74,21 @@ def _dump_w_model(
 
 def _dump_policy(policy: Any, policy_name: str = "pi_new") -> None:
     print(f"  {policy_name}:")
-    if hasattr(policy, "probs"):
+    if hasattr(policy, "to_tabular_policy"):
+        try:
+            tabular = policy.to_tabular_policy()
+            probs = getattr(tabular, "probs", {})
+            print("    tabularized_from=", type(policy).__name__)
+        except Exception as exc:  # pragma: no cover - debug path
+            print(f"    tabularize_error={exc}")
+            probs = getattr(policy, "probs", {})
+    elif hasattr(policy, "probs"):
         probs = getattr(policy, "probs")
+    else:
+        probs = None
+    if isinstance(probs, dict):
         state_keys = set()
+        timesteps = set()
         for k in probs.keys():
             if (
                 isinstance(k, tuple)
@@ -84,11 +96,16 @@ def _dump_policy(policy: Any, policy_name: str = "pi_new") -> None:
                 and isinstance(k[0], int)
                 and isinstance(k[1], tuple)
             ):
+                timesteps.add(int(k[0]))
                 state_keys.add(k[1])
             else:
                 state_keys.add(k)
         print("    n_states_with_probs=", len(state_keys))
         print("    n_table_entries=", len(probs))
+        if timesteps:
+            print("    n_timesteps_with_probs=", len(timesteps))
+        sample_keys = sorted(probs.keys(), key=lambda x: str(x))[:8]
+        print("    probs(sample)=", {k: probs[k] for k in sample_keys})
         print("    probs(full)=", probs)
         q_values = getattr(policy, "q_values", None)
         if isinstance(q_values, dict):
@@ -99,6 +116,14 @@ def _dump_policy(policy: Any, policy_name: str = "pi_new") -> None:
                 print(f"      table={q_t}")
     else:
         print("    object=", policy)
+    if hasattr(policy, "metadata"):
+        try:
+            print("    metadata=", policy.metadata())
+        except Exception as exc:  # pragma: no cover - debug path
+            print(f"    metadata_error={exc}")
+    training_stats = getattr(policy, "training_stats", None)
+    if isinstance(training_stats, dict):
+        print("    training_stats=", training_stats)
 
 
 def _dump_stitched_cover(h: int, cover: PolicyMixture) -> None:
@@ -201,6 +226,7 @@ def run_codex_w(
                 fit_lr_decay=weight_fit_lr_decay,
                 fit_patience=weight_fit_patience,
                 zero_absorbing_after_fit=weight_zero_absorbing_after_fit,
+                verbose=verbose,
             )
             if verbose:
                 print(
@@ -233,6 +259,7 @@ def run_codex_w(
                 epsilon_opt=epsilon_opt,
                 delta_opt=delta_opt,
                 psdp_epsilon_greedy=psdp_epsilon_greedy,
+                verbose=verbose,
             )
             if verbose:
                 _dump_policy(pi_new, policy_name=f"pi^(h={h},t={t})")

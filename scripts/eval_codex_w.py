@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+
+_ROLLOUT_ENV_FACTORY = None
 
 
 def _root() -> Path:
@@ -61,35 +65,22 @@ def _eval_uniform_policy(
     n_actions: int,
     n_rollouts: int,
     seed: int,
+    workers: int = 8,
 ) -> tuple[int, float, float]:
     """Evaluate pure uniform-random actions for ``horizon_h`` steps."""
-    rng = np.random.default_rng(seed)
-    seen = set()
-    total_steps = 0
-    success = 0
-
-    for _ in range(n_rollouts):
-        env = env_factory()
-        obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
-        seen.add(tuple(int(x) for x in np.asarray(obs).reshape(-1)))
-        terminated = truncated = False
-        reached_goal = False
-        for _t in range(horizon_h):
-            if terminated or truncated:
-                break
-            a = int(rng.integers(0, n_actions))
-            obs, reward, terminated, truncated, _ = env.step(a)
-            if float(reward) == 1.0:
-                reached_goal = True
-            seen.add(tuple(int(x) for x in np.asarray(obs).reshape(-1)))
-            total_steps += 1
-        if reached_goal:
-            success += 1
-
-    uniq = len(seen)
-    density = float(uniq / max(total_steps, 1))
+    records, success = _collect_rollout_records_uniform(
+        env_factory,
+        horizon_h=horizon_h,
+        n_actions=n_actions,
+        n_rollouts=n_rollouts,
+        seed=seed,
+        workers=workers,
+        include_success=True,
+    )
+    seen = set(zip(records["x"].tolist(), records["y"].tolist()))
+    total_steps = int(records["step"].shape[0])
     success_prob = float(success / max(n_rollouts, 1))
-    return uniq, density, success_prob
+    return len(seen), float(len(seen) / max(total_steps, 1)), success_prob
 
 
 def _eval_mixture_policy(
@@ -99,38 +90,108 @@ def _eval_mixture_policy(
     rollout_steps: int,
     n_rollouts: int,
     seed: int,
+    workers: int = 8,
 ) -> tuple[int, float, float]:
     """Evaluate one cover mixture for a fixed rollout horizon."""
-    rng = np.random.default_rng(seed)
-    seen = set()
-    total_steps = 0
-    success = 0
-
-    for _ in range(n_rollouts):
-        env = env_factory()
-        obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
-        seen.add(tuple(int(x) for x in np.asarray(obs).reshape(-1)))
-        terminated = truncated = False
-        reached_goal = False
-
-        pi = mixture.sample_policy(rng)
-        for t in range(rollout_steps):
-            if terminated or truncated:
-                break
-            a = pi.act(np.asarray(obs), t, rng)
-            obs, reward, terminated, truncated, _ = env.step(a)
-            if float(reward) == 1.0:
-                reached_goal = True
-            seen.add(tuple(int(x) for x in np.asarray(obs).reshape(-1)))
-            total_steps += 1
-
-        if reached_goal:
-            success += 1
-
-    uniq = len(seen)
-    density = float(uniq / max(total_steps, 1))
+    records, success = _collect_rollout_records_mixture(
+        env_factory,
+        mixture,
+        rollout_steps=rollout_steps,
+        n_rollouts=n_rollouts,
+        seed=seed,
+        workers=workers,
+        include_success=True,
+    )
+    seen = set(zip(records["x"].tolist(), records["y"].tolist()))
+    total_steps = int(records["step"].shape[0])
     success_prob = float(success / max(n_rollouts, 1))
-    return uniq, density, success_prob
+    return len(seen), float(len(seen) / max(total_steps, 1)), success_prob
+
+
+def _cpu_safe_policy(policy, *, verbose: bool = False):
+    base = getattr(policy, "base", None)
+    if base is not None:
+        safe_base = _cpu_safe_policy(base, verbose=verbose)
+        if safe_base is not base:
+            from codex.rollouts import ComposedUniformPolicy
+
+            return ComposedUniformPolicy(
+                safe_base,
+                int(getattr(policy, "n_actions")),
+                int(getattr(policy, "first_uniform_timestep")),
+            )
+        return policy
+    if hasattr(policy, "to_tabular_policy"):
+        t0 = time.perf_counter()
+        out = policy.to_tabular_policy()
+        if verbose:
+            print(
+                f"[timing] extract tabular policy ({type(policy).__name__}): "
+                f"{time.perf_counter() - t0:.3f}s"
+            )
+        return out
+    return policy
+
+
+def _pool_for_workers(workers: int):
+    if workers <= 1:
+        return None
+    try:
+        return mp.get_context("fork").Pool(processes=workers)
+    except ValueError:
+        return mp.get_context().Pool(processes=workers)
+
+
+def _sample_component_index(weights: np.ndarray, rng: np.random.Generator) -> int:
+    return int(rng.choice(len(weights), p=weights))
+
+
+def _uniform_rollout_worker(args):
+    rollout_id, horizon_h, n_actions, seed = args
+    env = _ROLLOUT_ENV_FACTORY()
+    rng = np.random.default_rng(seed)
+    obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
+    terminated = truncated = False
+    reached_goal = False
+    rec_step: list[int] = []
+    rec_x: list[int] = []
+    rec_y: list[int] = []
+    for step in range(horizon_h):
+        x, y = int(obs[0]), int(obs[1])
+        rec_step.append(step)
+        rec_x.append(x)
+        rec_y.append(y)
+        if terminated or truncated:
+            break
+        a = int(rng.integers(0, n_actions))
+        obs, reward, terminated, truncated, _ = env.step(a)
+        if float(reward) == 1.0:
+            reached_goal = True
+    return rollout_id, rec_step, rec_x, rec_y, int(reached_goal)
+
+
+def _mixture_rollout_worker(args):
+    rollout_id, policy, rollout_steps, seed = args
+    env = _ROLLOUT_ENV_FACTORY()
+    rng = np.random.default_rng(seed)
+    obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
+    terminated = truncated = False
+    reached_goal = False
+    rec_step: list[int] = []
+    rec_x: list[int] = []
+    rec_y: list[int] = []
+    for step in range(rollout_steps):
+        x, y = int(obs[0]), int(obs[1])
+        rec_step.append(step)
+        rec_x.append(x)
+        rec_y.append(y)
+        if terminated or truncated:
+            break
+        a = int(policy.act(np.asarray(obs), step, rng))
+        obs, reward, terminated, truncated, _ = env.step(a)
+        if float(reward) == 1.0:
+            reached_goal = True
+    return rollout_id, rec_step, rec_x, rec_y, int(reached_goal)
 
 
 def _collect_rollout_records_uniform(
@@ -140,34 +201,46 @@ def _collect_rollout_records_uniform(
     n_actions: int,
     n_rollouts: int,
     seed: int,
-) -> dict[str, np.ndarray]:
+    workers: int = 8,
+    include_success: bool = False,
+) -> dict[str, np.ndarray] | tuple[dict[str, np.ndarray], int]:
     """Collect raw per-step rollout records for pure uniform-random policy."""
     rng = np.random.default_rng(seed)
+    global _ROLLOUT_ENV_FACTORY
+    _ROLLOUT_ENV_FACTORY = env_factory
+    seeds = [int(x) for x in rng.integers(0, 2**31 - 1, size=n_rollouts, dtype=np.int64)]
+    tasks = [(rid, horizon_h, n_actions, seeds[rid]) for rid in range(n_rollouts)]
+    pool = _pool_for_workers(max(int(workers), 1))
+    try:
+        if pool is None:
+            results = [_uniform_rollout_worker(t) for t in tasks]
+        else:
+            results = pool.map(_uniform_rollout_worker, tasks)
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
+        _ROLLOUT_ENV_FACTORY = None
     records_rollout_id: list[int] = []
     records_step: list[int] = []
     records_x: list[int] = []
     records_y: list[int] = []
-
-    for rollout_id in range(n_rollouts):
-        env = env_factory()
-        obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
-        terminated = truncated = False
-        for step in range(horizon_h):
-            x, y = int(obs[0]), int(obs[1])
-            records_rollout_id.append(rollout_id)
-            records_step.append(step)
-            records_x.append(x)
-            records_y.append(y)
-            if terminated or truncated:
-                break
-            a = int(rng.integers(0, n_actions))
-            obs, _reward, terminated, truncated, _ = env.step(a)
-    return {
+    success = 0
+    for rid, step_list, x_list, y_list, ok in results:
+        success += int(ok)
+        records_rollout_id.extend([rid] * len(step_list))
+        records_step.extend(step_list)
+        records_x.extend(x_list)
+        records_y.extend(y_list)
+    payload = {
         "rollout_id": np.asarray(records_rollout_id, dtype=np.int32),
         "step": np.asarray(records_step, dtype=np.int32),
         "x": np.asarray(records_x, dtype=np.int32),
         "y": np.asarray(records_y, dtype=np.int32),
     }
+    if include_success:
+        return payload, int(success)
+    return payload
 
 
 def _collect_rollout_records_mixture(
@@ -177,35 +250,66 @@ def _collect_rollout_records_mixture(
     rollout_steps: int,
     n_rollouts: int,
     seed: int,
-) -> dict[str, np.ndarray]:
+    workers: int = 8,
+    include_success: bool = False,
+    verbose: bool = False,
+) -> dict[str, np.ndarray] | tuple[dict[str, np.ndarray], int]:
     """Collect raw per-step rollout records for one cover mixture."""
     rng = np.random.default_rng(seed)
+    global _ROLLOUT_ENV_FACTORY
+    _ROLLOUT_ENV_FACTORY = env_factory
+    cache_t0 = time.perf_counter()
+    cached_components = [
+        _cpu_safe_policy(policy, verbose=verbose) for policy in mixture.policies
+    ]
+    cache_elapsed = time.perf_counter() - cache_t0
+    sampled_component_indices = [
+        _sample_component_index(mixture.weights, rng) for _ in range(n_rollouts)
+    ]
+    rollout_policies = [cached_components[idx] for idx in sampled_component_indices]
+    if verbose:
+        print(
+            "[timing] mixture component cache build: "
+            f"{cache_elapsed:.3f}s "
+            f"(components={len(cached_components)}, rollouts={n_rollouts}, "
+            f"reuse_hits={max(n_rollouts - len(cached_components), 0)})"
+        )
+    seeds = [int(x) for x in rng.integers(0, 2**31 - 1, size=n_rollouts, dtype=np.int64)]
+    tasks = [
+        (rid, rollout_policies[rid], rollout_steps, seeds[rid])
+        for rid in range(n_rollouts)
+    ]
+    pool = _pool_for_workers(max(int(workers), 1))
+    try:
+        if pool is None:
+            results = [_mixture_rollout_worker(t) for t in tasks]
+        else:
+            results = pool.map(_mixture_rollout_worker, tasks)
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
+        _ROLLOUT_ENV_FACTORY = None
     records_rollout_id: list[int] = []
     records_step: list[int] = []
     records_x: list[int] = []
     records_y: list[int] = []
-
-    for rollout_id in range(n_rollouts):
-        env = env_factory()
-        obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
-        terminated = truncated = False
-        pi = mixture.sample_policy(rng)
-        for step in range(rollout_steps):
-            x, y = int(obs[0]), int(obs[1])
-            records_rollout_id.append(rollout_id)
-            records_step.append(step)
-            records_x.append(x)
-            records_y.append(y)
-            if terminated or truncated:
-                break
-            a = pi.act(np.asarray(obs), step, rng)
-            obs, _reward, terminated, truncated, _ = env.step(a)
-    return {
+    success = 0
+    for rid, step_list, x_list, y_list, ok in results:
+        success += int(ok)
+        records_rollout_id.extend([rid] * len(step_list))
+        records_step.extend(step_list)
+        records_x.extend(x_list)
+        records_y.extend(y_list)
+    payload = {
         "rollout_id": np.asarray(records_rollout_id, dtype=np.int32),
         "step": np.asarray(records_step, dtype=np.int32),
         "x": np.asarray(records_x, dtype=np.int32),
         "y": np.asarray(records_y, dtype=np.int32),
     }
+    if include_success:
+        return payload, int(success)
+    return payload
 
 
 def _make_run_dirs(root_dir: Path, width: int, length: int, t_rounds: int) -> dict[str, Path]:
@@ -257,7 +361,14 @@ def _flatten_numeric_values(obj) -> list[int]:
     return vals
 
 
-def _export_final_mixture(mixture, *, json_path: Path, npz_path: Path) -> None:
+def _export_final_mixture(
+    mixture,
+    *,
+    json_path: Path,
+    npz_path: Path,
+    weights_dir: Path | None = None,
+    verbose: bool = False,
+) -> None:
     component_payloads: list[dict] = []
     rows: list[tuple[int, int, int, int, float]] = []
     for comp_idx, policy in enumerate(mixture.policies):
@@ -271,10 +382,36 @@ def _export_final_mixture(mixture, *, json_path: Path, npz_path: Path) -> None:
             )
         base = getattr(policy, "base", None)
         if base is not None:
+            safe_base = _cpu_safe_policy(base, verbose=verbose)
+            if safe_base is not base:
+                payload["base_tabularized"] = True
             payload["base_type"] = type(base).__name__
-            probs = getattr(base, "probs", None)
+            if hasattr(base, "metadata"):
+                payload["base_metadata"] = _to_jsonable(base.metadata())
+            if isinstance(weights_dir, Path) and hasattr(base, "save"):
+                weights_dir.mkdir(parents=True, exist_ok=True)
+                weights_path = weights_dir / f"component_{comp_idx}_base_policy.pt"
+                base.save(weights_path)
+                payload["base_weights_path"] = str(weights_path)
+            training_stats = getattr(base, "training_stats", None)
+            if isinstance(training_stats, dict):
+                payload["base_training_stats"] = _to_jsonable(training_stats)
+            probs = getattr(safe_base, "probs", getattr(base, "probs", None))
         else:
-            probs = getattr(policy, "probs", None)
+            safe_policy = _cpu_safe_policy(policy, verbose=verbose)
+            if safe_policy is not policy:
+                payload["tabularized"] = True
+            if hasattr(policy, "metadata"):
+                payload["metadata"] = _to_jsonable(policy.metadata())
+            if isinstance(weights_dir, Path) and hasattr(policy, "save"):
+                weights_dir.mkdir(parents=True, exist_ok=True)
+                weights_path = weights_dir / f"component_{comp_idx}_policy.pt"
+                policy.save(weights_path)
+                payload["weights_path"] = str(weights_path)
+            training_stats = getattr(policy, "training_stats", None)
+            if isinstance(training_stats, dict):
+                payload["training_stats"] = _to_jsonable(training_stats)
+            probs = getattr(safe_policy, "probs", getattr(policy, "probs", None))
         if isinstance(probs, dict):
             exported_probs = {}
             for sk, prob_vec in probs.items():
@@ -421,10 +558,10 @@ def main() -> int:
     # horizon_h = 200
     # epsilon = 0.1
 
-    width, length = 1, 8
+    width, length = 1, 15
     n_actions = 4
-    horizon_h = 10
-    epsilon = 0.05
+    horizon_h = 7
+    epsilon = 0.03
 
     t_rounds = int(np.ceil(1.0 / epsilon))
     root_dir = _root()
@@ -435,7 +572,9 @@ def main() -> int:
 
     psdp_epsilon_greedy = 0.0
     per_h_rollouts = 500
+    rollout_workers = 8
     print("epsilon_greedy: ", psdp_epsilon_greedy)
+    print("rollout_workers: ", rollout_workers)
     rng_seed = 42
     run_codex_w_kwargs = {
         "horizon_h": horizon_h,
@@ -458,6 +597,7 @@ def main() -> int:
         "return_diagnostics": True,
         "verbose": True,
     }
+    verbose = bool(run_codex_w_kwargs.get("verbose", False))
     config_payload = {
         "script": "scripts/eval_codex_w.py",
         "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -472,6 +612,7 @@ def main() -> int:
             for k, v in run_codex_w_kwargs.items()
         },
         "per_h_rollouts": per_h_rollouts,
+        "rollout_workers": rollout_workers,
     }
     config_path = run_dirs["run_dir"] / "config.json"
     _save_json(config_path, config_payload)
@@ -479,12 +620,15 @@ def main() -> int:
     print(f"config_path: {config_path.resolve()}")
 
     def _on_layer_complete(h: int, cover) -> None:
+        cb_t0 = time.perf_counter()
         mixture_records_h = _collect_rollout_records_mixture(
             env_factory,
             cover,
             rollout_steps=h,
             n_rollouts=per_h_rollouts,
             seed=2700 + h,
+            workers=rollout_workers,
+            verbose=verbose,
         )
         uniform_records_h = _collect_rollout_records_uniform(
             env_factory,
@@ -492,6 +636,7 @@ def main() -> int:
             n_actions=n_actions,
             n_rollouts=per_h_rollouts,
             seed=2900 + h,
+            workers=rollout_workers,
         )
         mixture_rollouts_json_h = run_dirs["rollouts_dir"] / f"h{h}_mixture_rollouts.json"
         mixture_rollouts_npz_h = run_dirs["rollouts_dir"] / f"h{h}_mixture_rollouts.npz"
@@ -522,6 +667,11 @@ def main() -> int:
         )
         print(f"[realtime] h={h} mixture_npz={mixture_rollouts_npz_h.resolve()}")
         print(f"[realtime] h={h} uniform_npz={uniform_rollouts_npz_h.resolve()}")
+        if verbose:
+            print(
+                f"[timing] rollout policy & save (h={h}): "
+                f"{time.perf_counter() - cb_t0:.3f}s"
+            )
 
     covers, policies, diagnostics = run_codex_w(
         env_factory,
@@ -571,6 +721,7 @@ def main() -> int:
             rollout_steps=i,
             n_rollouts=per_h_rollouts,
             seed=700 + i,
+            workers=rollout_workers,
         )
         u_uniq, u_density, u_success = _eval_uniform_policy(
             env_factory,
@@ -578,6 +729,7 @@ def main() -> int:
             n_actions=n_actions,
             n_rollouts=per_h_rollouts,
             seed=900 + i,
+            workers=rollout_workers,
         )
         print(
             f"i={i}: "
@@ -589,11 +741,20 @@ def main() -> int:
     final_mixture = covers[horizon_h]
     final_mixture_json = run_dirs["artifacts_dir"] / "final_mixture_policy.json"
     final_mixture_npz = run_dirs["artifacts_dir"] / "final_mixture_policy.npz"
+    final_mixture_weights_dir = run_dirs["artifacts_dir"] / "final_mixture_weights"
+    export_t0 = time.perf_counter()
     _export_final_mixture(
         final_mixture,
         json_path=final_mixture_json,
         npz_path=final_mixture_npz,
+        weights_dir=final_mixture_weights_dir,
+        verbose=verbose,
     )
+    if verbose:
+        print(
+            f"[timing] extract tabular policy + export final mixture: "
+            f"{time.perf_counter() - export_t0:.3f}s"
+        )
     print(f"final_mixture_json: {final_mixture_json.resolve()}")
     print(f"final_mixture_npz: {final_mixture_npz.resolve()}")
 

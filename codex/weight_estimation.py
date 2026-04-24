@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import time
 from typing import Any
 
 import numpy as np
@@ -10,9 +11,42 @@ from numpy.random import Generator
 
 from models.weight_fn import TabularWeightModel, n_weight_samples
 
-from .rollouts import Policy, PolicyMixture, build_q_mixture, sample_transition_at_layer
+from .rollouts import (
+    ComposedUniformPolicy,
+    Policy,
+    PolicyMixture,
+    build_q_mixture,
+    sample_transition_at_layer,
+)
 
 _POOL_ENV_FACTORY: Any | None = None
+
+
+def _policy_has_cuda_tensors(policy: Any) -> bool:
+    candidate = getattr(policy, "base", policy)
+    model = getattr(candidate, "model", None)
+    if model is None:
+        return False
+    try:
+        return any(getattr(p, "is_cuda", False) for p in model.parameters())
+    except Exception:
+        return False
+
+
+def _cpu_safe_policy(policy: Policy) -> Policy:
+    base = getattr(policy, "base", None)
+    if base is not None:
+        safe_base = _cpu_safe_policy(base)
+        if safe_base is not base:
+            return ComposedUniformPolicy(
+                safe_base,
+                int(getattr(policy, "n_actions")),
+                int(getattr(policy, "first_uniform_timestep")),
+            )
+        return policy
+    if hasattr(policy, "to_tabular_policy"):
+        return policy.to_tabular_policy()
+    return policy
 
 
 def _sample_mixture_with_retry_worker(
@@ -63,6 +97,7 @@ def estimate_weight_function(
     fit_patience: int = 60,
     weight_sample_workers: int = 8,
     zero_absorbing_after_fit: bool = False,
+    verbose: bool = False,
 ) -> tuple[TabularWeightModel, dict[str, float]]:
     """
     ``EstimateWeightFunction_{h,t}(p_{h-1}, {pi^i}_{i<t}; eps, delta, W)``.
@@ -108,9 +143,22 @@ def estimate_weight_function(
     global _POOL_ENV_FACTORY
     _POOL_ENV_FACTORY = env_factory
     pool = None
+    tabular_t0 = time.perf_counter()
+    q = PolicyMixture(
+        policies=[_cpu_safe_policy(pol) for pol in q.policies],
+        weights=np.asarray(q.weights, dtype=np.float64),
+    )
+    history_policies = [_cpu_safe_policy(pol) for pol in history_policies]
+    tabular_elapsed = time.perf_counter() - tabular_t0
+    if verbose:
+        print(
+            f"  [timing] weight_estimation extract_tabular_policy: {tabular_elapsed:.3f}s"
+        )
+
     if workers > 1:
         try:
-            pool = mp.get_context("fork").Pool(processes=workers)
+            ctx_name = "fork"
+            pool = mp.get_context(ctx_name).Pool(processes=workers)
         except ValueError:
             # Fallback for platforms where "fork" context is unavailable.
             pool = mp.get_context().Pool(processes=workers)
@@ -152,6 +200,7 @@ def estimate_weight_function(
         results = pool.map(_sample_policy_worker, tasks, chunksize=chunk)
         return [tr for tr in results if tr is not None]
 
+    rollout_t0 = time.perf_counter()
     try:
         # Initial n samples (Algorithm 5 line 5): same transition into D1 and D2.
         init_samples = _collect_mixture_samples(q, n)
@@ -177,6 +226,9 @@ def estimate_weight_function(
             pool.close()
             pool.join()
         _POOL_ENV_FACTORY = None
+    rollout_elapsed = time.perf_counter() - rollout_t0
+    if verbose:
+        print(f"  [timing] weight_estimation rollout: {rollout_elapsed:.3f}s")
 
     if not d1:
         return model, {
@@ -188,6 +240,7 @@ def estimate_weight_function(
             "objective_after": 0.0,
         }
 
+    fit_t0 = time.perf_counter()
     fit_stats = model.fit(
         d1,
         d2,
@@ -198,6 +251,9 @@ def estimate_weight_function(
         lr_decay=fit_lr_decay,
         patience=fit_patience,
     )
+    fit_elapsed = time.perf_counter() - fit_t0
+    if verbose:
+        print(f"  [timing] weight_estimation_fit: {fit_elapsed:.3f}s")
     metrics = {
         "layer": float(layer_h),
         "iteration": float(iteration_t),
