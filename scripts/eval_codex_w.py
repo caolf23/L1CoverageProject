@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 _ROLLOUT_ENV_FACTORY = None
+_TABULAR_POLICY_CACHE: dict[int, object] = {}
 
 
 def _root() -> Path:
@@ -109,17 +110,24 @@ def _eval_mixture_policy(
 
 
 def _cpu_safe_policy(policy, *, verbose: bool = False):
+    cache_key = id(policy)
+    if cache_key in _TABULAR_POLICY_CACHE:
+        return _TABULAR_POLICY_CACHE[cache_key]
+
     base = getattr(policy, "base", None)
     if base is not None:
         safe_base = _cpu_safe_policy(base, verbose=verbose)
         if safe_base is not base:
             from codex.rollouts import ComposedUniformPolicy
 
-            return ComposedUniformPolicy(
+            safe_composed = ComposedUniformPolicy(
                 safe_base,
                 int(getattr(policy, "n_actions")),
                 int(getattr(policy, "first_uniform_timestep")),
             )
+            _TABULAR_POLICY_CACHE[cache_key] = safe_composed
+            return safe_composed
+        _TABULAR_POLICY_CACHE[cache_key] = policy
         return policy
     if hasattr(policy, "to_tabular_policy"):
         t0 = time.perf_counter()
@@ -129,7 +137,9 @@ def _cpu_safe_policy(policy, *, verbose: bool = False):
                 f"[timing] extract tabular policy ({type(policy).__name__}): "
                 f"{time.perf_counter() - t0:.3f}s"
             )
+        _TABULAR_POLICY_CACHE[cache_key] = out
         return out
+    _TABULAR_POLICY_CACHE[cache_key] = policy
     return policy
 
 
@@ -560,8 +570,8 @@ def main() -> int:
 
     width, length = 1, 15
     n_actions = 4
-    horizon_h = 7
-    epsilon = 0.03
+    horizon_h = 10
+    epsilon = 0.1
 
     t_rounds = int(np.ceil(1.0 / epsilon))
     root_dir = _root()
@@ -570,10 +580,10 @@ def main() -> int:
     def env_factory() -> TightropeEnv:
         return TightropeEnv(width=width, length=length, max_steps=400)
 
-    psdp_epsilon_greedy = 0.0
+    ppo_clip_ratio = 0.2
     per_h_rollouts = 500
     rollout_workers = 8
-    print("epsilon_greedy: ", psdp_epsilon_greedy)
+    print("ppo_clip_ratio: ", ppo_clip_ratio)
     print("rollout_workers: ", rollout_workers)
     rng_seed = 42
     run_codex_w_kwargs = {
@@ -586,14 +596,22 @@ def main() -> int:
         "rng": np.random.default_rng(rng_seed),
         "epsilon_w": 0.5,
         "weight_fit_steps": 500,
-        "psdp_samples": 1000,
+        "ppo_rollouts": 2048,
+        "ppo_epochs": 32,
+        "ppo_minibatch_size": 128,
+        "ppo_clip_ratio": ppo_clip_ratio,
+        "ppo_lr": 2e-3,
+        "ppo_gamma": 1.0,
+        "ppo_gae_lambda": 1.0,
+        "ppo_value_coef": 0.5,
+        "ppo_entropy_coef": 0.0,
+        "ppo_max_grad_norm": 1.0,
         "n_weight_cap": 1024,
         "weight_sample_workers": 8,
         "weight_fit_lr": 0.50,
         "weight_fit_lr_decay": 1.0,
         "weight_fit_patience": 300,
         "weight_zero_absorbing_after_fit": False,
-        "psdp_epsilon_greedy": psdp_epsilon_greedy,
         "return_diagnostics": True,
         "verbose": True,
     }

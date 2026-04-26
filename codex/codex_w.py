@@ -17,6 +17,42 @@ from .rollouts import (
 )
 from .weight_estimation import estimate_weight_function
 
+def _compute_w_model_max(
+    w_model: Any,
+    *,
+    width: int,
+    length: int,
+    n_actions: int,
+) -> float:
+    """Compute max w(x'|x,a) over valid transitions including absorbing self-loops."""
+    if not hasattr(w_model, "prob"):
+        return float("nan")
+
+    max_w = float("-inf")
+    dead_obs = np.array([length, width], dtype=np.int32)
+    for x in range(length):
+        for y in range(width):
+            obs = np.array([x, y], dtype=np.int32)
+            for a in range(n_actions):
+                next_obs, term_peek, trunc, r_peek = tightrope_predict_next(
+                    obs, a, width, length
+                )
+                if trunc or (term_peek and float(r_peek) != 1.0):
+                    continue
+                w_val = float(w_model.prob(obs, a, next_obs))
+                max_w = max(max_w, w_val)
+
+    for a in range(n_actions):
+        next_obs, _term_peek, _trunc, _r_peek = tightrope_predict_next(
+            dead_obs, a, width, length
+        )
+        w_val = float(w_model.prob(dead_obs, a, next_obs))
+        max_w = max(max_w, w_val)
+
+    if not np.isfinite(max_w):
+        return float("nan")
+    return float(max_w)
+
 
 def _dump_w_model(
     w_model: Any,
@@ -155,7 +191,16 @@ def run_codex_w(
     c_prime: float = 0.1,
     epsilon_w: float | None = None,
     weight_fit_steps: int = 700,
-    psdp_samples: int = 600,
+    ppo_rollouts: int = 64,
+    ppo_epochs: int = 6,
+    ppo_minibatch_size: int = 128,
+    ppo_clip_ratio: float = 0.2,
+    ppo_lr: float = 3e-4,
+    ppo_gamma: float = 1.0,
+    ppo_gae_lambda: float = 0.95,
+    ppo_value_coef: float = 0.5,
+    ppo_entropy_coef: float = 0.01,
+    ppo_max_grad_norm: float = 0.5,
     n_weight_cap: int | None = 96,
     weight_sample_workers: int = 8,
     weight_fit_lr: float = 0.12,
@@ -163,7 +208,6 @@ def run_codex_w(
     weight_fit_lr_decay: float = 0.997,
     weight_fit_patience: int = 60,
     weight_zero_absorbing_after_fit: bool = False,
-    psdp_epsilon_greedy: float = 0.05,
     on_layer_complete: Callable[[int, PolicyMixture], None] | None = None,
     verbose: bool = False,
     return_diagnostics: bool = False,
@@ -228,6 +272,12 @@ def run_codex_w(
                 zero_absorbing_after_fit=weight_zero_absorbing_after_fit,
                 verbose=verbose,
             )
+            w_hat_max = _compute_w_model_max(
+                w_model,
+                width=width,
+                length=length,
+                n_actions=n_actions,
+            )
             if verbose:
                 print(
                     "  fit_metrics:",
@@ -255,11 +305,27 @@ def run_codex_w(
                 length=length,
                 n_actions=n_actions,
                 rng=rng,
-                psdp_samples=psdp_samples,
+                ppo_rollouts=ppo_rollouts,
+                ppo_epochs=ppo_epochs,
+                ppo_minibatch_size=ppo_minibatch_size,
+                ppo_clip_ratio=ppo_clip_ratio,
+                ppo_lr=ppo_lr,
+                ppo_gamma=ppo_gamma,
+                ppo_gae_lambda=ppo_gae_lambda,
+                ppo_value_coef=ppo_value_coef,
+                ppo_entropy_coef=ppo_entropy_coef,
+                ppo_max_grad_norm=ppo_max_grad_norm,
                 epsilon_opt=epsilon_opt,
                 delta_opt=delta_opt,
-                psdp_epsilon_greedy=psdp_epsilon_greedy,
                 verbose=verbose,
+            )
+            intrinsic_mean = float(
+                getattr(pi_new, "training_stats", {}).get("intrinsic_return_mean", np.nan)
+            )
+            print(
+                f"[metrics] h={h} t={t} "
+                f"w_hat_max={w_hat_max:.6f} "
+                f"ppo_intrinsic_reward_mean={intrinsic_mean:.6f}"
             )
             if verbose:
                 _dump_policy(pi_new, policy_name=f"pi^(h={h},t={t})")
