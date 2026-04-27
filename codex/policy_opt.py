@@ -27,6 +27,7 @@ def policy_optimization_h_minus_1(
     epsilon_opt: float = 0.05,
     delta_opt: float = 0.01,
     psdp_epsilon_greedy: float = 0.05,
+    use_distance_bonus: bool = True,
 ) -> TabularPolicy:
     """
     ``PolicyOptimization_{h-1}(...)`` via tabular PSDP-style dynamic programming.
@@ -55,6 +56,8 @@ def policy_optimization_h_minus_1(
         return int(rng.choice(n_actions, p=p))
 
     def _distance_bonus(obs: np.ndarray, start_obs: np.ndarray) -> float:
+        if not use_distance_bonus:
+            return 0.0
         if int(obs[0]) == int(length) and int(obs[1]) == int(width):
             return 0.0
         dist = abs(int(obs[0]) - int(start_obs[0])) + abs(int(obs[1]) - int(start_obs[1]))

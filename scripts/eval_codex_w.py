@@ -433,8 +433,10 @@ def main() -> int:
         return TightropeEnv(width=width, length=length, max_steps=400)
 
     psdp_epsilon_greedy = 0.0
+    use_distance_bonus = False
     per_h_rollouts = 500
     print("epsilon_greedy: ", psdp_epsilon_greedy)
+    print("use_distance_bonus: ", use_distance_bonus)
     rng_seed = 42
     run_codex_w_kwargs = {
         "horizon_h": horizon_h,
@@ -454,6 +456,7 @@ def main() -> int:
         "weight_fit_patience": 300,
         "weight_zero_absorbing_after_fit": False,
         "psdp_epsilon_greedy": psdp_epsilon_greedy,
+        "use_distance_bonus": use_distance_bonus,
         "return_diagnostics": True,
         "verbose": True,
     }

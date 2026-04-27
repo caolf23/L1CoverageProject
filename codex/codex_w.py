@@ -23,6 +23,7 @@ def _dump_w_model(
     width: int,
     length: int,
     n_actions: int,
+    use_distance_bonus: bool = True,
 ) -> None:
     print("  w_model:")
     if hasattr(w_model, "prob_state"):
@@ -31,6 +32,8 @@ def _dump_w_model(
         start_obs = np.array([0, width // 2], dtype=np.int32)
 
         def _distance_bonus(obs: np.ndarray) -> float:
+            if not use_distance_bonus:
+                return 0.0
             if int(obs[0]) == int(length) and int(obs[1]) == int(width):
                 return 0.0
             dist = abs(int(obs[0]) - int(start_obs[0])) + abs(int(obs[1]) - int(start_obs[1]))
@@ -128,6 +131,7 @@ def run_codex_w(
     weight_fit_patience: int = 60,
     weight_zero_absorbing_after_fit: bool = False,
     psdp_epsilon_greedy: float = 0.05,
+    use_distance_bonus: bool = True,
     on_layer_complete: Callable[[int, PolicyMixture], None] | None = None,
     verbose: bool = False,
     return_diagnostics: bool = False,
@@ -206,6 +210,7 @@ def run_codex_w(
                     width=width,
                     length=length,
                     n_actions=n_actions,
+                    use_distance_bonus=use_distance_bonus,
                 )
             diagnostics.append(fit_metrics)
             cover_prefix = [covers[i] for i in range(1, h)]
@@ -222,6 +227,7 @@ def run_codex_w(
                 epsilon_opt=epsilon_opt,
                 delta_opt=delta_opt,
                 psdp_epsilon_greedy=psdp_epsilon_greedy,
+                use_distance_bonus=use_distance_bonus,
             )
             if verbose:
                 _dump_policy(pi_new, policy_name=f"pi^(h={h},t={t})")
