@@ -10,7 +10,7 @@ from numpy.random import Generator
 
 from models.weight_fn import TabularWeightModel
 
-from .rollouts import PolicyMixture, TabularPolicy, state_key, tightrope_predict_next
+from .rollouts import PolicyMixture, TabularPolicy, state_key
 
 
 def policy_optimization_h_minus_1(
@@ -54,6 +54,12 @@ def policy_optimization_h_minus_1(
             return int(rng.integers(0, n_actions))
         return int(rng.choice(n_actions, p=p))
 
+    def _distance_bonus(obs: np.ndarray, start_obs: np.ndarray) -> float:
+        if int(obs[0]) == int(length) and int(obs[1]) == int(width):
+            return 0.0
+        dist = abs(int(obs[0]) - int(start_obs[0])) + abs(int(obs[1]) - int(start_obs[1]))
+        return 0.01 * float(dist)
+
     # Backward dynamic programming over timesteps 0..h-2.
     for target_t in range(layer_h - 2, -1, -1):
         returns_by_sa: dict[tuple[Any, int], list[float]] = defaultdict(list)
@@ -62,12 +68,13 @@ def policy_optimization_h_minus_1(
             env = env_factory()
             obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
             obs = np.asarray(obs, dtype=np.int32)
+            start_obs = obs.copy()
             terminated = truncated = False
 
-            # Prefix rollout to reach x_l.
+            # Prefix rollout: sample once per episode, then keep fixed policy.
+            prefix_policy = cover_mixtures[target_t].sample_policy(rng)
             for t in range(target_t):
-                pol = cover_mixtures[t].sample_policy(rng)
-                a_pref = pol.act(obs, t, rng)
+                a_pref = prefix_policy.act(obs, t, rng)
                 obs, _r, terminated, truncated, _ = env.step(a_pref)
                 obs = np.asarray(obs, dtype=np.int32)
                 if terminated or truncated:
@@ -82,22 +89,20 @@ def policy_optimization_h_minus_1(
             a_l = int(rng.integers(0, n_actions))
             obs_next, _r_env, terminated, truncated, _ = env.step(a_l)
             obs_next = np.asarray(obs_next, dtype=np.int32)
-            ret = float(w_hat.prob(x_l, a_l, obs_next))
+            ret = float(w_hat.prob_state(obs_next)) + _distance_bonus(obs_next, start_obs)
             obs = obs_next
 
             # Suffix rollout using already-computed future policies.
-            # Reward is given only at paper step h (the transition x_{h-1}->x_h),
-            # which is timestep (layer_h - 2) in 0-based indexing.
-            if target_t == layer_h - 2:
-                ret = float(w_hat.prob(x_l, a_l, obs_next))
+            # Reward is state-based and applied at every reached position.
             for t in range(target_t + 1, layer_h - 1):
                 if terminated or truncated:
                     break
                 a_suf = _sample_from_future_policy(obs, t)
                 obs_next, _r_env, terminated, truncated, _ = env.step(a_suf)
                 obs_next = np.asarray(obs_next, dtype=np.int32)
-                if t == layer_h - 2:
-                    ret = float(w_hat.prob(obs, a_suf, obs_next))
+                ret += float(w_hat.prob_state(obs_next)) + _distance_bonus(
+                    obs_next, start_obs
+                )
                 obs = obs_next
 
             returns_by_sa[(state_l_key, a_l)].append(ret)

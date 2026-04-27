@@ -13,7 +13,6 @@ from .rollouts import (
     ComposedUniformPolicy,
     PolicyMixture,
     UniformRandomPolicy,
-    tightrope_predict_next,
 )
 from .weight_estimation import estimate_weight_function
 
@@ -26,48 +25,38 @@ def _dump_w_model(
     n_actions: int,
 ) -> None:
     print("  w_model:")
-    if hasattr(w_model, "prob"):
+    if hasattr(w_model, "prob_state"):
         n_states = length * width
         dead_obs = np.array([length, width], dtype=np.int32)
+        start_obs = np.array([0, width // 2], dtype=np.int32)
 
-        def _state_idx(obs: np.ndarray) -> int:
-            x, y = int(obs[0]), int(obs[1])
-            if x == length and y == width:
-                return n_states
-            return x * width + y
+        def _distance_bonus(obs: np.ndarray) -> float:
+            if int(obs[0]) == int(length) and int(obs[1]) == int(width):
+                return 0.0
+            dist = abs(int(obs[0]) - int(start_obs[0])) + abs(int(obs[1]) - int(start_obs[1]))
+            return 0.01 * float(dist)
 
         for s_idx in range(n_states):
             x = s_idx // width
             y = s_idx % width
             obs = np.array([x, y], dtype=np.int32)
-            for a in range(n_actions):
-                next_obs, term_peek, trunc, r_peek = tightrope_predict_next(
-                    obs, a, width, length
-                )
-                if trunc or (term_peek and float(r_peek) != 1.0):
-                    print(
-                        f"    state:{s_idx} action:{a} next_state:INVALID,reject_sample"
-                    )
-                    continue
-                next_idx = _state_idx(next_obs)
-                w_val = float(w_model.prob(obs, a, next_obs))
-                print(
-                    f"    state:{s_idx} action:{a} next_state:{next_idx},reward:{w_val:.6f}"
-                )
-
-        # Also show transitions from absorbing/dead state.
-        dead_idx = n_states
-        for a in range(n_actions):
-            next_obs, term_peek, trunc, r_peek = tightrope_predict_next(
-                dead_obs, a, width, length
-            )
-            next_idx = _state_idx(next_obs)
-            w_val = float(w_model.prob(dead_obs, a, next_obs))
+            w_val = float(w_model.prob_state(obs))
+            d_val = _distance_bonus(obs)
+            total = w_val + d_val
             print(
-                "    state:"
-                f"{dead_idx} action:{a} next_state:{next_idx},"
-                f"reward:{w_val:.6f}"
+                f"    state:{s_idx},state_reward:{w_val:.6f},"
+                f"distance_bonus:{d_val:.6f},total_reward:{total:.6f}"
             )
+
+        # Also show state reward on absorbing/dead state.
+        dead_idx = n_states
+        w_val = float(w_model.prob_state(dead_obs))
+        d_val = _distance_bonus(dead_obs)
+        total = w_val + d_val
+        print(
+            f"    state:{dead_idx},state_reward:{w_val:.6f},"
+            f"distance_bonus:{d_val:.6f},total_reward:{total:.6f}"
+        )
     else:
         print("    object=", w_model)
 

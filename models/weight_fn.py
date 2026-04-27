@@ -1,4 +1,4 @@
-"""Tabular conditional weight ``w(x' | x, a)`` for Algorithm 5 (discrete states)."""
+"""Tabular state weight ``w(x)`` for Algorithm 5 (discrete states)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import numpy as np
 class TabularWeightModel:
     """
     Tabular parameterization:
-    ``w(s'|s,a) = w_table[s,a,s']``.
+    ``w(s) = w_table[s]``.
 
     States are indexed ``s_idx = x * width + y`` for grid observations ``(x, y)``.
     The absorbing state is represented by coordinates ``(length, width)`` and
@@ -31,11 +31,7 @@ class TabularWeightModel:
         self.n_states = self.n_grid_states + 1
         self.zero_absorbing_after_fit = bool(zero_absorbing_after_fit)
         self.eps = 1e-9
-        self.w_table = np.full(
-            (self.n_states, n_actions, self.n_states),
-            self.eps,
-            dtype=np.float64,
-        )
+        self.w_table = np.full((self.n_states,), self.eps, dtype=np.float64)
 
     def state_index(self, obs: np.ndarray) -> int:
         x, y = int(obs[0]), int(obs[1])
@@ -43,38 +39,29 @@ class TabularWeightModel:
             return self.n_grid_states
         return x * self.width + y
 
-    def prob(self, obs: np.ndarray, a: int, obs_next: np.ndarray) -> float:
+    def prob_state(self, obs: np.ndarray) -> float:
         si = self.state_index(obs)
-        sj = self.state_index(obs_next)
-        aa = int(a)
-        return float(self.w_table[si, aa, sj])
+        return float(self.w_table[si])
 
-    def log_prob(self, obs: np.ndarray, a: int, obs_next: np.ndarray) -> float:
-        p = np.clip(self.prob(obs, a, obs_next), self.eps, 1.0 - self.eps)
+    def log_prob_state(self, obs: np.ndarray) -> float:
+        p = np.clip(self.prob_state(obs), self.eps, 1.0 - self.eps)
         return float(np.log(p))
 
-    def _to_index_arrays(
-        self,
-        data: list[tuple[np.ndarray, int, np.ndarray]],
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _to_index_array(self, data: list[np.ndarray]) -> np.ndarray:
         if not data:
-            empty = np.empty((0,), dtype=np.int64)
-            return empty, empty, empty
-        si = np.fromiter((self.state_index(obs) for obs, _, _ in data), dtype=np.int64)
-        aa = np.fromiter((int(a) for _, a, _ in data), dtype=np.int64)
-        sj = np.fromiter((self.state_index(sp) for _, _, sp in data), dtype=np.int64)
-        return si, aa, sj
+            return np.empty((0,), dtype=np.int64)
+        return np.fromiter((self.state_index(obs) for obs in data), dtype=np.int64)
 
     @property
     def log_w_class_size(self) -> float:
         """Rough ``log |W|`` for sample-size heuristic."""
-        n = self.n_states * self.n_actions * self.n_states
+        n = self.n_states
         return math.log(max(n, 2))
 
     def fit(
         self,
-        d1: list[tuple[np.ndarray, int, np.ndarray]],
-        d2: list[tuple[np.ndarray, int, np.ndarray]],
+        d1: list[np.ndarray],
+        d2: list[np.ndarray],
         t: int,
         *,
         steps: int = 700,
@@ -85,9 +72,9 @@ class TabularWeightModel:
         min_improvement: float = 1e-5,
     ) -> dict[str, float]:
         """
-        Closed-form maximization on ``mean_{D1} log w - t * mean_{D2} w``.
+        Closed-form maximization on ``mean_{D1} log w(s) - t * mean_{D2} w(s)``.
 
-        For each tabular transition ``(s,a,s')`` with counts ``c1`` in D1 and ``c2`` in D2:
+        For each state ``s`` with counts ``c1`` in D1 and ``c2`` in D2:
             maximize ``(c1/|D1|) log w - (t*c2/|D2|) w`` over ``w in [eps, 1-eps]``.
         """
         if not d1:
@@ -97,8 +84,8 @@ class TabularWeightModel:
         n2_raw = len(d2)
         n2 = max(n2_raw, 1)
 
-        d1_si, d1_aa, d1_sj = self._to_index_arrays(d1)
-        d2_si, d2_aa, d2_sj = self._to_index_arrays(d2)
+        d1_si = self._to_index_array(d1)
+        d2_si = self._to_index_array(d2)
 
         objective_before = self.objective(d1, d2, t)
 
@@ -107,9 +94,9 @@ class TabularWeightModel:
 
         count1 = np.zeros_like(self.w_table, dtype=np.float64)
         count2 = np.zeros_like(self.w_table, dtype=np.float64)
-        np.add.at(count1, (d1_si, d1_aa, d1_sj), 1.0)
+        np.add.at(count1, d1_si, 1.0)
         if d2_si.size > 0:
-            np.add.at(count2, (d2_si, d2_aa, d2_sj), 1.0)
+            np.add.at(count2, d2_si, 1.0)
 
         c1_pos = count1 > 0.0
         c2_pos = count2 > 0.0
@@ -131,7 +118,7 @@ class TabularWeightModel:
         self.w_table = np.clip(new_w, self.eps, 1.0 - self.eps)
         if self.zero_absorbing_after_fit:
             # Post-fit projection: force all transitions from absorbing source to eps.
-            self.w_table[self.n_grid_states, :, :] = self.eps
+            self.w_table[self.n_grid_states] = self.eps
         objective_after = self.objective(d1, d2, t)
         return {
             "objective_before": float(objective_before),
@@ -140,19 +127,19 @@ class TabularWeightModel:
 
     def objective(
         self,
-        d1: list[tuple[np.ndarray, int, np.ndarray]],
-        d2: list[tuple[np.ndarray, int, np.ndarray]],
+        d1: list[np.ndarray],
+        d2: list[np.ndarray],
         t: int,
     ) -> float:
-        """Algorithm 5 objective: ``mean(log w on D1) - t * mean(w on D2)``."""
+        """Algorithm 5 objective: ``mean(log w(s) on D1) - t * mean(w(s) on D2)``."""
         if not d1:
             return 0.0
-        d1_si, d1_aa, d1_sj = self._to_index_arrays(d1)
-        d1_w = np.clip(self.w_table[d1_si, d1_aa, d1_sj], self.eps, 1.0 - self.eps)
+        d1_si = self._to_index_array(d1)
+        d1_w = np.clip(self.w_table[d1_si], self.eps, 1.0 - self.eps)
         term1 = float(np.mean(np.log(d1_w)))
         if d2:
-            d2_si, d2_aa, d2_sj = self._to_index_arrays(d2)
-            term2 = float(np.mean(self.w_table[d2_si, d2_aa, d2_sj]))
+            d2_si = self._to_index_array(d2)
+            term2 = float(np.mean(self.w_table[d2_si]))
         else:
             term2 = 0.0
         return term1 - float(t) * term2

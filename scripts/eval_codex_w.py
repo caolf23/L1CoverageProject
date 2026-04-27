@@ -395,11 +395,10 @@ def _semantic_checks(
     model = TabularWeightModel(length=length, width=width, n_actions=n_actions)
     n_states = model.n_states
     sum_w = 0.0
-    test_obs = np.array([0, min(width - 1, 1)], dtype=np.int32)
     for x in range(length):
         for y in range(width):
-            sum_w += model.prob(test_obs, 0, np.array([x, y], dtype=np.int32))
-    sum_w += model.prob(test_obs, 0, np.array([length, width], dtype=np.int32))
+            sum_w += model.prob_state(np.array([x, y], dtype=np.int32))
+    sum_w += model.prob_state(np.array([length, width], dtype=np.int32))
     if np.isclose(sum_w, 1.0, atol=1e-2):
         issues.append(
             f"weight model still appears softmax-normalized (sum over next states ~= 1, got {sum_w:.6f})"
@@ -421,10 +420,10 @@ def main() -> int:
     # horizon_h = 200
     # epsilon = 0.1
 
-    width, length = 1, 8
+    width, length = 1, 15
     n_actions = 4
-    horizon_h = 10
-    epsilon = 0.05
+    horizon_h = 15
+    epsilon = 0.1
 
     t_rounds = int(np.ceil(1.0 / epsilon))
     root_dir = _root()
