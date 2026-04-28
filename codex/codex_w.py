@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import Any, Callable
 
 import numpy as np
@@ -123,6 +124,7 @@ def run_codex_w(
     epsilon_w: float | None = None,
     weight_fit_steps: int = 700,
     psdp_samples: int = 600,
+    psdp_sample_workers: int = 8,
     n_weight_cap: int | None = 96,
     weight_sample_workers: int = 8,
     weight_fit_lr: float = 0.12,
@@ -195,6 +197,7 @@ def run_codex_w(
                 fit_patience=weight_fit_patience,
                 zero_absorbing_after_fit=weight_zero_absorbing_after_fit,
             )
+            psdp_t0 = time.perf_counter()
             if verbose:
                 print(
                     "  fit_metrics:",
@@ -224,10 +227,20 @@ def run_codex_w(
                 n_actions=n_actions,
                 rng=rng,
                 psdp_samples=psdp_samples,
+                psdp_sample_workers=psdp_sample_workers,
                 epsilon_opt=epsilon_opt,
                 delta_opt=delta_opt,
                 psdp_epsilon_greedy=psdp_epsilon_greedy,
                 use_distance_bonus=use_distance_bonus,
+            )
+            psdp_time_sec = float(time.perf_counter() - psdp_t0)
+            fit_metrics["psdp_sec"] = psdp_time_sec
+            print(
+                "[timing] "
+                f"h={h} t={t} "
+                f"weight_estimation_rollout={fit_metrics.get('weight_estimation_rollout_sec', 0.0):.4f}s "
+                f"weight_fit={fit_metrics.get('weight_fit_sec', 0.0):.4f}s "
+                f"psdp={psdp_time_sec:.4f}s"
             )
             if verbose:
                 _dump_policy(pi_new, policy_name=f"pi^(h={h},t={t})")

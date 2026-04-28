@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import time
 from typing import Any
 
 import numpy as np
@@ -205,6 +206,7 @@ def estimate_weight_function(
             transitions.append((states[step].copy(), int(a), states[step + 1].copy()))
         return transitions
 
+    rollout_t0 = time.perf_counter()
     try:
         # Initial n samples (Algorithm 5 line 5): same rollout positions into D1 and D2.
         init_samples = _collect_mixture_samples(q, n)
@@ -232,6 +234,8 @@ def estimate_weight_function(
             pool.join()
         _POOL_ENV_FACTORY = None
 
+    rollout_time_sec = float(time.perf_counter() - rollout_t0)
+
     if not d1:
         return model, {
             "layer": float(layer_h),
@@ -240,8 +244,11 @@ def estimate_weight_function(
             "n_d2": 0.0,
             "objective_before": 0.0,
             "objective_after": 0.0,
+            "weight_estimation_rollout_sec": rollout_time_sec,
+            "weight_fit_sec": 0.0,
         }
 
+    fit_t0 = time.perf_counter()
     fit_stats = model.fit(
         d1,
         d2,
@@ -252,6 +259,7 @@ def estimate_weight_function(
         lr_decay=fit_lr_decay,
         patience=fit_patience,
     )
+    fit_time_sec = float(time.perf_counter() - fit_t0)
     metrics = {
         "layer": float(layer_h),
         "iteration": float(iteration_t),
@@ -259,5 +267,7 @@ def estimate_weight_function(
         "n_d2": float(len(d2)),
         "objective_before": float(fit_stats["objective_before"]),
         "objective_after": float(fit_stats["objective_after"]),
+        "weight_estimation_rollout_sec": rollout_time_sec,
+        "weight_fit_sec": fit_time_sec,
     }
     return model, metrics

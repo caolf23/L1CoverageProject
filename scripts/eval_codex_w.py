@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -337,6 +338,19 @@ def _save_rollout_records(
     _save_json(json_path, payload)
 
 
+def _timing_stats(values: list[float]) -> dict[str, float]:
+    if not values:
+        return {"count": 0.0, "total": 0.0, "mean": 0.0, "p95": 0.0, "max": 0.0}
+    arr = np.asarray(values, dtype=np.float64)
+    return {
+        "count": float(arr.size),
+        "total": float(arr.sum()),
+        "mean": float(arr.mean()),
+        "p95": float(np.percentile(arr, 95)),
+        "max": float(arr.max()),
+    }
+
+
 def _semantic_checks(
     env_factory,
     *,
@@ -420,10 +434,10 @@ def main() -> int:
     # horizon_h = 200
     # epsilon = 0.1
 
-    width, length = 5, 20
+    width, length = 2, 20
     n_actions = 4
-    horizon_h = 200
-    epsilon = 0.01
+    horizon_h = 25
+    epsilon = 0.1
 
     t_rounds = int(np.ceil(1.0 / epsilon))
     root_dir = _root()
@@ -449,6 +463,7 @@ def main() -> int:
         "epsilon_w": 0.5,
         "weight_fit_steps": 500,
         "psdp_samples": 1000,
+        "psdp_sample_workers": 8,
         "n_weight_cap": 1024,
         "weight_sample_workers": 8,
         "weight_fit_lr": 0.50,
@@ -479,11 +494,15 @@ def main() -> int:
     _save_json(config_path, config_payload)
     print(f"run_output_dir: {run_dirs['run_dir'].resolve()}")
     print(f"config_path: {config_path.resolve()}")
+    rollout_save_times: list[float] = []
+    plot_times: list[float] = []
+    train_t0 = time.perf_counter()
 
     def _on_layer_complete(h: int, cover) -> None:
         # Local import keeps script launch robust across cwd / PYTHONPATH setups.
         from plot_heatmap_from_rollouts import plot_for_single_h
 
+        rollout_save_t0 = time.perf_counter()
         mixture_records_h = _collect_rollout_records_mixture(
             env_factory,
             cover,
@@ -520,6 +539,9 @@ def main() -> int:
             n_rollouts=per_h_rollouts,
             rollout_steps=h,
         )
+        rollout_save_sec = float(time.perf_counter() - rollout_save_t0)
+        rollout_save_times.append(rollout_save_sec)
+        print(f"[timing] h={h} rollout&save={rollout_save_sec:.4f}s")
         print(
             f"[realtime] h={h} saved "
             f"mixture_records={int(mixture_records_h['x'].shape[0])} "
@@ -527,6 +549,7 @@ def main() -> int:
         )
         print(f"[realtime] h={h} mixture_npz={mixture_rollouts_npz_h.resolve()}")
         print(f"[realtime] h={h} uniform_npz={uniform_rollouts_npz_h.resolve()}")
+        plot_t0 = time.perf_counter()
         try:
             plot_outputs = plot_for_single_h(run_dirs["run_dir"], h, count_mode="both")
             for out in plot_outputs:
@@ -548,12 +571,17 @@ def main() -> int:
                 )
         except Exception as exc:
             print(f"WARN: realtime plot generation failed for h={h}: {exc}")
+        finally:
+            plot_sec = float(time.perf_counter() - plot_t0)
+            plot_times.append(plot_sec)
+            print(f"[timing] h={h} plot={plot_sec:.4f}s")
 
     covers, policies, diagnostics = run_codex_w(
         env_factory,
         on_layer_complete=_on_layer_complete,
         **run_codex_w_kwargs,
     )
+    total_train_sec = float(time.perf_counter() - train_t0)
 
     print("=== Structure Checks ===")
     issues = _structure_checks(
@@ -588,6 +616,38 @@ def main() -> int:
             f"J_before={jb:.6f} J_after={ja:.6f} dJ={delta:+.6f}"
         )
     print(f"Improved entries: {improved}/{len(diagnostics)}")
+    print("\n=== Timing Summary ===")
+    weight_rollout_times = [
+        float(d.get("weight_estimation_rollout_sec", 0.0)) for d in diagnostics
+    ]
+    weight_fit_times = [float(d.get("weight_fit_sec", 0.0)) for d in diagnostics]
+    psdp_times = [float(d.get("psdp_sec", 0.0)) for d in diagnostics]
+    timing_sections = {
+        "weight_estimation_rollout": weight_rollout_times,
+        "weight_fit": weight_fit_times,
+        "psdp": psdp_times,
+        "rollout&save": rollout_save_times,
+    }
+    for name, vals in timing_sections.items():
+        stats = _timing_stats(vals)
+        ratio = (
+            100.0 * stats["total"] / total_train_sec
+            if total_train_sec > 0.0
+            else 0.0
+        )
+        print(
+            f"[timing][summary] {name}: "
+            f"count={int(stats['count'])} total={stats['total']:.4f}s "
+            f"mean={stats['mean']:.4f}s p95={stats['p95']:.4f}s max={stats['max']:.4f}s "
+            f"share={ratio:.2f}%"
+        )
+    plot_stats = _timing_stats(plot_times)
+    print(
+        f"[timing][summary] plot: count={int(plot_stats['count'])} "
+        f"total={plot_stats['total']:.4f}s mean={plot_stats['mean']:.4f}s "
+        f"p95={plot_stats['p95']:.4f}s max={plot_stats['max']:.4f}s"
+    )
+    print(f"[timing][summary] total_train={total_train_sec:.4f}s")
 
     print("\n=== Per-Layer p_i vs i-step Uniform ===")
     for i in range(1, horizon_h + 1):
