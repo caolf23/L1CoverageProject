@@ -168,6 +168,23 @@ def _plot_for_h(run_dir: Path, h: int, *, count_mode: str) -> dict[str, object]:
     }
 
 
+def plot_for_single_h(
+    run_dir: Path, h: int, *, count_mode: str = "both"
+) -> list[dict[str, object]]:
+    """Public helper: plot heatmaps for one ``h`` only."""
+    run_dir = run_dir.expanduser().resolve()
+    if count_mode == "both":
+        modes: tuple[str, ...] = ("all_steps_within_h", "final_step_within_h")
+    elif count_mode in ("all_steps_within_h", "final_step_within_h"):
+        modes = (count_mode,)
+    else:
+        raise ValueError(
+            f"unsupported count_mode={count_mode}, expected one of "
+            "('both', 'all_steps_within_h', 'final_step_within_h')"
+        )
+    return [_plot_for_h(run_dir, int(h), count_mode=mode) for mode in modes]
+
+
 def plot_all_from_run_dir(
     run_dir: Path, *, count_mode: str = "both"
 ) -> list[dict[str, object]]:
@@ -180,18 +197,8 @@ def plot_all_from_run_dir(
             hs.append(int(m.group(1)))
     hs = sorted(set(hs))
     outputs: list[dict[str, object]] = []
-    if count_mode == "both":
-        modes: tuple[str, ...] = ("all_steps_within_h", "final_step_within_h")
-    elif count_mode in ("all_steps_within_h", "final_step_within_h"):
-        modes = (count_mode,)
-    else:
-        raise ValueError(
-            f"unsupported count_mode={count_mode}, expected one of "
-            "('both', 'all_steps_within_h', 'final_step_within_h')"
-        )
     for h in hs:
-        for mode in modes:
-            outputs.append(_plot_for_h(run_dir, h, count_mode=mode))
+        outputs.extend(plot_for_single_h(run_dir, h, count_mode=count_mode))
     return outputs
 
 

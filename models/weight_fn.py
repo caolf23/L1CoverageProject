@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 import numpy as np
 
 
@@ -52,6 +53,22 @@ class TabularWeightModel:
             return np.empty((0,), dtype=np.int64)
         return np.fromiter((self.state_index(obs) for obs in data), dtype=np.int64)
 
+    def _transition_indices(
+        self, data: list[tuple[np.ndarray, int, np.ndarray]]
+    ) -> np.ndarray:
+        if not data:
+            return np.empty((0, 3), dtype=np.int64)
+        rows = []
+        for prev_obs, action, next_obs in data:
+            rows.append(
+                (
+                    int(self.state_index(prev_obs)),
+                    int(action),
+                    int(self.state_index(next_obs)),
+                )
+            )
+        return np.asarray(rows, dtype=np.int64)
+
     @property
     def log_w_class_size(self) -> float:
         """Rough ``log |W|`` for sample-size heuristic."""
@@ -60,7 +77,7 @@ class TabularWeightModel:
 
     def fit(
         self,
-        d1: list[np.ndarray],
+        d1: list[tuple[np.ndarray, int, np.ndarray]],
         d2: list[np.ndarray],
         t: int,
         *,
@@ -72,54 +89,60 @@ class TabularWeightModel:
         min_improvement: float = 1e-5,
     ) -> dict[str, float]:
         """
-        Closed-form maximization on ``mean_{D1} log w(s) - t * mean_{D2} w(s)``.
+        Closed-form maximization using transition counts in D1.
 
-        For each state ``s`` with counts ``c1`` in D1 and ``c2`` in D2:
-            maximize ``(c1/|D1|) log w - (t*c2/|D2|) w`` over ``w in [eps, 1-eps]``.
+        For each transition ``(s,a,s')``:
+        - ``n1`` = count of this transition in D1
+        - ``n2`` = count of ``s'`` in D2
+        - ``tmp(s,a,s') = argmax_w [n1 * log(w) - n2 * w]``
+
+        Final ``w(s')`` is the average of all incoming ``tmp`` values whose
+        destination is ``s'``.
         """
         if not d1:
             return {"objective_before": 0.0, "objective_after": 0.0}
 
-        n1 = len(d1)
-        n2_raw = len(d2)
-        n2 = max(n2_raw, 1)
-
-        d1_si = self._to_index_array(d1)
+        t_used = int(t)
+        del t
+        d1_ti = self._transition_indices(d1)
         d2_si = self._to_index_array(d2)
 
-        objective_before = self.objective(d1, d2, t)
+        objective_before = self.objective(d1, d2, t_used)
 
         # Unused with closed-form solver; kept in signature for caller compatibility.
         del steps, lr, l2, lr_decay, patience, min_improvement
 
-        count1 = np.zeros_like(self.w_table, dtype=np.float64)
-        count2 = np.zeros_like(self.w_table, dtype=np.float64)
-        np.add.at(count1, d1_si, 1.0)
+        next_state_count_d2 = np.zeros_like(self.w_table, dtype=np.float64)
         if d2_si.size > 0:
-            np.add.at(count2, d2_si, 1.0)
+            np.add.at(next_state_count_d2, d2_si, 1.0)
 
-        c1_pos = count1 > 0.0
-        c2_pos = count2 > 0.0
-        both_pos = c1_pos & c2_pos
+        transition_count: dict[tuple[int, int, int], float] = defaultdict(float)
+        for src_idx, action, dst_idx in d1_ti:
+            transition_count[(int(src_idx), int(action), int(dst_idx))] += 1.0
+
+        incoming_tmp_sum = np.zeros_like(self.w_table, dtype=np.float64)
+        incoming_tmp_cnt = np.zeros_like(self.w_table, dtype=np.float64)
+
+        for (_src_idx, _action, dst_idx), n1 in transition_count.items():
+            n2 = float(next_state_count_d2[int(dst_idx)])
+            # argmax of n1*log(w)-n2*w on (0, +inf): w*=n1/n2, boundary when n2=0.
+            if n2 <= 0.0:
+                tmp = 1.0 - self.eps
+            else:
+                tmp = float(n1 / n2)
+            tmp = float(np.clip(tmp, self.eps, 1.0 - self.eps))
+            incoming_tmp_sum[int(dst_idx)] += tmp
+            incoming_tmp_cnt[int(dst_idx)] += 1.0
 
         new_w = np.full_like(self.w_table, self.eps, dtype=np.float64)
-        new_w[c1_pos & ~c2_pos] = 1.0 - self.eps
-
-        if np.any(both_pos):
-            ratio = np.empty_like(self.w_table, dtype=np.float64)
-            np.divide(
-                count1 * float(n2),
-                float(max(int(t), 1)) * count2 * float(n1),
-                out=ratio,
-                where=both_pos,
-            )
-            new_w[both_pos] = ratio[both_pos]
+        has_incoming = incoming_tmp_cnt > 0.0
+        new_w[has_incoming] = incoming_tmp_sum[has_incoming] / incoming_tmp_cnt[has_incoming]
 
         self.w_table = np.clip(new_w, self.eps, 1.0 - self.eps)
         if self.zero_absorbing_after_fit:
             # Post-fit projection: force all transitions from absorbing source to eps.
             self.w_table[self.n_grid_states] = self.eps
-        objective_after = self.objective(d1, d2, t)
+        objective_after = self.objective(d1, d2, t_used)
         return {
             "objective_before": float(objective_before),
             "objective_after": float(objective_after),
@@ -127,15 +150,16 @@ class TabularWeightModel:
 
     def objective(
         self,
-        d1: list[np.ndarray],
+        d1: list[tuple[np.ndarray, int, np.ndarray]],
         d2: list[np.ndarray],
         t: int,
     ) -> float:
-        """Algorithm 5 objective: ``mean(log w(s) on D1) - t * mean(w(s) on D2)``."""
+        """Proxy objective: ``mean(log w(s') on D1) - t * mean(w(s) on D2)``."""
         if not d1:
             return 0.0
-        d1_si = self._to_index_array(d1)
-        d1_w = np.clip(self.w_table[d1_si], self.eps, 1.0 - self.eps)
+        d1_ti = self._transition_indices(d1)
+        d1_dst_si = d1_ti[:, 2]
+        d1_w = np.clip(self.w_table[d1_dst_si], self.eps, 1.0 - self.eps)
         term1 = float(np.mean(np.log(d1_w)))
         if d2:
             d2_si = self._to_index_array(d2)

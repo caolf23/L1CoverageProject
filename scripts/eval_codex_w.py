@@ -420,10 +420,10 @@ def main() -> int:
     # horizon_h = 200
     # epsilon = 0.1
 
-    width, length = 1, 15
+    width, length = 5, 20
     n_actions = 4
-    horizon_h = 15
-    epsilon = 0.1
+    horizon_h = 200
+    epsilon = 0.01
 
     t_rounds = int(np.ceil(1.0 / epsilon))
     root_dir = _root()
@@ -481,6 +481,9 @@ def main() -> int:
     print(f"config_path: {config_path.resolve()}")
 
     def _on_layer_complete(h: int, cover) -> None:
+        # Local import keeps script launch robust across cwd / PYTHONPATH setups.
+        from plot_heatmap_from_rollouts import plot_for_single_h
+
         mixture_records_h = _collect_rollout_records_mixture(
             env_factory,
             cover,
@@ -524,6 +527,27 @@ def main() -> int:
         )
         print(f"[realtime] h={h} mixture_npz={mixture_rollouts_npz_h.resolve()}")
         print(f"[realtime] h={h} uniform_npz={uniform_rollouts_npz_h.resolve()}")
+        try:
+            plot_outputs = plot_for_single_h(run_dirs["run_dir"], h, count_mode="both")
+            for out in plot_outputs:
+                print(
+                    f"[realtime] h={h} mode={out['count_mode']} "
+                    f"policy_heatmap={out['policy_path']}"
+                )
+                print(
+                    f"[realtime] h={h} mode={out['count_mode']} "
+                    f"uniform_heatmap={out['uniform_path']}"
+                )
+                print(
+                    f"[realtime] h={h} mode={out['count_mode']} "
+                    f"policy_log_heatmap={out['policy_log_path']}"
+                )
+                print(
+                    f"[realtime] h={h} mode={out['count_mode']} "
+                    f"uniform_log_heatmap={out['uniform_log_path']}"
+                )
+        except Exception as exc:
+            print(f"WARN: realtime plot generation failed for h={h}: {exc}")
 
     covers, policies, diagnostics = run_codex_w(
         env_factory,
@@ -599,17 +623,7 @@ def main() -> int:
     print(f"final_mixture_json: {final_mixture_json.resolve()}")
     print(f"final_mixture_npz: {final_mixture_npz.resolve()}")
 
-    print(
-        "next_step_plot_cmd: "
-        f"python scripts/plot_heatmap_from_rollouts.py --run-dir {run_dirs['run_dir']}"
-    )
-    try:
-        from scripts.plot_heatmap_from_rollouts import plot_all_from_run_dir
-
-        plot_outputs = plot_all_from_run_dir(run_dirs["run_dir"], count_mode="both")
-        print(f"auto_plot_generated_files: {len(plot_outputs)}")
-    except Exception as exc:
-        print(f"WARN: auto plot generation failed: {exc}")
+    print("realtime_plot_status: enabled (per-layer in on_layer_complete)")
 
     if issues:
         print("\nOVERALL: check FAILED (see FAIL lines).")

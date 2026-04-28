@@ -13,11 +13,12 @@ from models.weight_fn import TabularWeightModel, n_weight_samples
 from .rollouts import Policy, PolicyMixture, build_q_mixture
 
 _POOL_ENV_FACTORY: Any | None = None
+Trajectory = tuple[list[np.ndarray], list[int]]
 
 
 def _sample_mixture_with_retry_worker(
     args: tuple[PolicyMixture, int, int, int]
-) -> list[np.ndarray] | None:
+) -> Trajectory | None:
     mix, layer_h, seed, outer_attempts = args
     if _POOL_ENV_FACTORY is None:
         raise RuntimeError("pool env_factory is not initialized")
@@ -25,15 +26,15 @@ def _sample_mixture_with_retry_worker(
     for _ in range(outer_attempts):
         env = _POOL_ENV_FACTORY()
         pol = mix.sample_policy(rng)
-        rollout_states = _sample_rollout_states(env, pol, layer_h=layer_h, rng=rng)
-        if rollout_states is not None:
-            return rollout_states
+        traj = _sample_rollout_states(env, pol, layer_h=layer_h, rng=rng)
+        if traj is not None:
+            return traj
     return None
 
 
 def _sample_policy_worker(
     args: tuple[Policy, int, int]
-) -> list[np.ndarray] | None:
+) -> Trajectory | None:
     policy, layer_h, seed = args
     if _POOL_ENV_FACTORY is None:
         raise RuntimeError("pool env_factory is not initialized")
@@ -49,9 +50,13 @@ def _sample_rollout_states(
     layer_h: int,
     rng: Generator,
     max_attempts: int = 512,
-) -> list[np.ndarray] | None:
+) -> Trajectory | None:
     """
-    Sample one rollout prefix ``[x_0, x_1, ..., x_{h-1}]`` for 1-based paper layer ``h``.
+    Sample one rollout prefix with states/actions for 1-based paper layer ``h``.
+
+    Returns ``(states, actions)`` where:
+    - ``states = [x_0, x_1, ..., x_{h-1}]`` has length ``h``.
+    - ``actions = [a_0, ..., a_{h-2}]`` has length ``h-1``.
     """
     if layer_h < 2:
         raise ValueError("layer_h must be >= 2")
@@ -60,16 +65,18 @@ def _sample_rollout_states(
         obs, _ = env.reset(seed=int(rng.integers(0, 2**31 - 1)))
         obs = np.asarray(obs, dtype=np.int32)
         states = [obs.copy()]
+        actions: list[int] = []
         terminated = truncated = False
         t = 0
         while t < target_steps and not (terminated or truncated):
             a = policy.act(obs, t, rng)
+            actions.append(int(a))
             obs, _r, terminated, truncated, _ = env.step(a)
             obs = np.asarray(obs, dtype=np.int32)
             states.append(obs.copy())
             t += 1
-        if len(states) == target_steps + 1:
-            return states
+        if len(states) == target_steps + 1 and len(actions) == target_steps:
+            return states, actions
     return None
 
 
@@ -114,12 +121,12 @@ def estimate_weight_function(
         n = min(n, int(n_weight_cap))
     n = max(n, 4)
 
-    d1: list[np.ndarray] = []
+    d1: list[tuple[np.ndarray, int, np.ndarray]] = []
     d2: list[np.ndarray] = []
 
     def draw_from_mixture(
         mix: PolicyMixture, local_rng: Generator
-    ) -> list[np.ndarray] | None:
+    ) -> Trajectory | None:
         env = env_factory()
         pol = mix.sample_policy(local_rng)
         return _sample_rollout_states(env, pol, layer_h=layer_h, rng=local_rng)
@@ -148,50 +155,61 @@ def estimate_weight_function(
 
     def _collect_mixture_samples(
         mix: PolicyMixture, count: int
-    ) -> list[list[np.ndarray]]:
+    ) -> list[Trajectory]:
         seeds = [int(x) for x in rng.integers(0, 2**31 - 1, size=count, dtype=np.int64)]
         if pool is None:
-            out: list[list[np.ndarray]] = []
+            out: list[Trajectory] = []
             for seed in seeds:
                 local_rng = np.random.default_rng(seed)
-                tr = None
                 for _ in range(256):
-                    rollout_states = draw_from_mixture(mix, local_rng)
-                    if rollout_states is not None:
+                    traj = draw_from_mixture(mix, local_rng)
+                    if traj is not None:
                         break
-                if rollout_states is not None:
-                    out.append(rollout_states)
+                if traj is not None:
+                    out.append(traj)
             return out
 
         tasks = [(mix, layer_h, seed, 256) for seed in seeds]
         chunk = max(1, count // max(4 * workers, 1))
         results = pool.map(_sample_mixture_with_retry_worker, tasks, chunksize=chunk)
-        return [rollout_states for rollout_states in results if rollout_states is not None]
+        return [traj for traj in results if traj is not None]
 
-    def _collect_policy_samples(policy: Policy, count: int) -> list[list[np.ndarray]]:
+    def _collect_policy_samples(policy: Policy, count: int) -> list[Trajectory]:
         seeds = [int(x) for x in rng.integers(0, 2**31 - 1, size=count, dtype=np.int64)]
         if pool is None:
-            out: list[list[np.ndarray]] = []
+            out: list[Trajectory] = []
             for seed in seeds:
                 local_rng = np.random.default_rng(seed)
                 env = env_factory()
-                rollout_states = _sample_rollout_states(
+                traj = _sample_rollout_states(
                     env, policy, layer_h=layer_h, rng=local_rng
                 )
-                if rollout_states is not None:
-                    out.append(rollout_states)
+                if traj is not None:
+                    out.append(traj)
             return out
 
         tasks = [(policy, layer_h, seed) for seed in seeds]
         chunk = max(1, count // max(4 * workers, 1))
         results = pool.map(_sample_policy_worker, tasks, chunksize=chunk)
-        return [rollout_states for rollout_states in results if rollout_states is not None]
+        return [traj for traj in results if traj is not None]
+
+    def _trajectory_to_transitions(
+        states: list[np.ndarray], actions: list[int]
+    ) -> list[tuple[np.ndarray, int, np.ndarray]]:
+        if not states:
+            return []
+        transitions: list[tuple[np.ndarray, int, np.ndarray]] = [
+            (states[0].copy(), 0, states[0].copy())
+        ]
+        for step, a in enumerate(actions):
+            transitions.append((states[step].copy(), int(a), states[step + 1].copy()))
+        return transitions
 
     try:
         # Initial n samples (Algorithm 5 line 5): same rollout positions into D1 and D2.
         init_samples = _collect_mixture_samples(q, n)
-        for states in init_samples:
-            d1.extend(states)
+        for states, actions in init_samples:
+            d1.extend(_trajectory_to_transitions(states, actions))
             d2.extend(states)
 
         # For each historical policy index i in 1..t-1 (0-based: i < t-1)
@@ -199,14 +217,14 @@ def estimate_weight_function(
             pi_i = history_policies[i]
 
             q_samples = _collect_mixture_samples(q, n)
-            for states in q_samples:
-                d1.extend(states)
+            for states, actions in q_samples:
+                d1.extend(_trajectory_to_transitions(states, actions))
 
             pi_samples = _collect_policy_samples(pi_i, n)
 
             m = min(len(q_samples), len(pi_samples))
             for j in range(m):
-                xtilde_states = pi_samples[j]
+                xtilde_states, _xtilde_actions = pi_samples[j]
                 d2.extend(xtilde_states)
     finally:
         if pool is not None:
