@@ -418,13 +418,13 @@ def main() -> int:
 
     # width, length = 5, 100
     # n_actions = 4
-    # horizon_h = 200
+    # horizon_h = 10
     # epsilon = 0.1
 
-    width, length = 1, 8
+    width, length = 1, 25
     n_actions = 4
-    horizon_h = 10
-    epsilon = 0.05
+    horizon_h = 25
+    epsilon = 0.1
 
     t_rounds = int(np.ceil(1.0 / epsilon))
     root_dir = _root()
@@ -453,7 +453,7 @@ def main() -> int:
         "weight_fit_lr": 0.50,
         "weight_fit_lr_decay": 1.0,
         "weight_fit_patience": 300,
-        "weight_zero_absorbing_after_fit": False,
+        "weight_zero_absorbing_after_fit": True,
         "psdp_epsilon_greedy": psdp_epsilon_greedy,
         "return_diagnostics": True,
         "verbose": True,

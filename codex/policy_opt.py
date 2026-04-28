@@ -64,10 +64,10 @@ def policy_optimization_h_minus_1(
             obs = np.asarray(obs, dtype=np.int32)
             terminated = truncated = False
 
-            # Prefix rollout to reach x_l.
+            # Prefix rollout: sample once per episode, then keep fixed policy.
+            prefix_policy = cover_mixtures[target_t].sample_policy(rng)
             for t in range(target_t):
-                pol = cover_mixtures[t].sample_policy(rng)
-                a_pref = pol.act(obs, t, rng)
+                a_pref = prefix_policy.act(obs, t, rng)
                 obs, _r, terminated, truncated, _ = env.step(a_pref)
                 obs = np.asarray(obs, dtype=np.int32)
                 if terminated or truncated:
