@@ -434,10 +434,10 @@ def main() -> int:
     # horizon_h = 200
     # epsilon = 0.1
 
-    width, length = 2, 20
+    width, length = 3, 40
     n_actions = 4
-    horizon_h = 25
-    epsilon = 0.1
+    horizon_h = 60
+    epsilon = 0.05
 
     t_rounds = int(np.ceil(1.0 / epsilon))
     root_dir = _root()
